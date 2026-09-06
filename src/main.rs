@@ -1,3 +1,5 @@
+mod utils;
+
 fn main() {
-    println!("Hello, world!");
+    let contents = utils::read("res/frames.txt").unwrap();
 }
