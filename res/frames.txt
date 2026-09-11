@@ -1,11 +1,13 @@
 ---frame---
-time_ms: 0
+time_ms: 300
+ 
  /\_/\ 
 ( ^.^ ) 
  > w < ~ 
 
 ---frame---
-time_ms: 750
+time_ms: 300
+ 
   /\_/\
 ( >.< )
  - v -  ~
