@@ -34,7 +34,7 @@ impl Framebuffer {
         }
     }
 
-    fn clean(&mut self, ch: char) {
+    fn clear(&mut self, ch: char) {
         for row in &mut self.buf_2d {
             for c in row.iter_mut() {
                 *c = ch;
@@ -67,129 +67,19 @@ impl Framebuffer {
     }
 }
 
-#[derive(Clone)]
-struct Keyframe {
-    time_ms: u64,
-    fb: Framebuffer,
-}
-
-fn max_frame_width(frames: Vec<Keyframe>) -> u16 {
-    // get string blocks from frames
-    let str_block_refs: Vec<&str> = frames.iter().map(|f| f.contents.as_str()).collect();
-
-    // extract each line from blocks into flat vec
-    let all_lines: Vec<&str> = str_block_refs.iter().flat_map(|s| s.lines()).collect();
-
-    let mut max_width = 0;
-    for line in all_lines {
-        let line_len = line.chars().count() as u16;
-        if line_len > max_width {
-            max_width = line_len;
-        }
-    }
-    max_width
-}
-
-fn max_frame_height(frames: Vec<Keyframe>) -> u16 {
-    // get string blocks from frames
-    let str_block_refs: Vec<&str> = frames.iter().map(|f| f.contents.as_str()).collect();
-
-    let mut max_height: u16 = 0;
-    for s in str_block_refs {
-        let height = 1 + s.chars().filter(|&c| c == '\n').count() as u16;
-        if height > max_height {
-            max_height = height;
-        }
-    }
-    max_height
-}
-
-// takes in raw contents and converts to vec of frame structs
-fn make_frames(raw: &str) -> Result<Vec<Keyframe>, io::Error> {
-    let mut frames = Vec::new();
-    let mut cur_time_ms = 0;
-    let mut cur_contents = String::new();
-
-    for line in raw.lines() {
-        if line.contains("---frame---") {
-            // flush current content and build frame
-            if !cur_contents.is_empty() {
-                frames.push(Keyframe {
-                    time_ms: cur_time_ms,
-                    framebuffer: raw
-                        .lines()
-                        .map(|line| {
-                            let mut row: Vec<char> = line.chars().collect();
-                            row.resize(width as usize, ' ');
-                            row
-                        })
-                        .collect(),
-                });
-                cur_contents.clear();
-            }
-        } else if line.starts_with("time_ms:") {
-            // parse time for accumulating frame
-            cur_time_ms = line.split(':').nth(1).unwrap().trim().parse().unwrap();
-        } else {
-            // accumulate content lines
-            if !line.is_empty() {
-                cur_contents.push_str(line);
-                cur_contents.push('\n');
-            }
-        }
-    }
-
-    // don't forget last frame!
-    if !cur_contents.is_empty() {
-        frames.push(Keyframe {
-            time_ms: cur_time_ms,
-            contents: cur_contents.trim_end().to_string(),
-        });
-    }
-
-    Ok(frames)
-}
-
-fn fix_frame_sizes(frames: &mut Vec<Keyframe>, target_width: u16, target_height: u16) {
-    for frame in frames {
-        let mut rows: Vec<String> = frame
-            .contents
-            .lines()
-            .map(|line| {
-                let pad = target_width.saturating_sub(line.chars().count() as u16);
-                format!("{}{}", line, " ".repeat(pad as usize))
-            })
-            .collect();
-
-        rows.resize(target_height as usize, " ".repeat(target_width as usize));
-        frame.contents = rows.join("\n");
-    }
-}
-
-fn make_bar(total_len: u16, progress: f32) -> String {
+fn make_bar(total_len: usize, progress: f32) -> String {
     let filled = (total_len as f32 * progress) as usize;
-    let empty = total_len as usize - filled;
-
-    let bar = "█".repeat(filled) + &"░".repeat(empty);
-    format!("\x1b[32m[{}]\x1b[0m ", bar)
+    let empty = total_len - filled;
+    format!("[{}] ", "█".repeat(filled) + &"░".repeat(empty))
 }
 
-fn draw<T: Write>(renderable: &str, writer: &mut T, width: u16, height: u16) {
+fn draw<T: Write>(fb: &Framebuffer, writer: &mut T, width: u16, height: u16) {
     // make style for text
     let style = Style::new().italic().fg(Color::Green);
 
-    // build grid of chars for frame
-    let grid: Vec<Vec<char>> = renderable
-        .lines()
-        .map(|line| {
-            let mut row: Vec<char> = line.chars().collect();
-            row.resize(width as usize, ' ');
-            row
-        })
-        .collect();
-
     draw_to(writer, DefRect::new(0, 0, width, height), |(x, y)| {
-        let c = grid
+        let c = fb
+            .buf_2d
             .get(y as usize)
             .and_then(|row| row.get(x as usize))
             .copied()
@@ -199,40 +89,91 @@ fn draw<T: Write>(renderable: &str, writer: &mut T, width: u16, height: u16) {
     .unwrap();
 }
 
+fn get_keyframes(raw: &str) -> Vec<(String, u16)> {
+    let mut frames = Vec::new();
+    let mut cur_time_ms = 0;
+    let mut cur_contents = String::new();
+
+    for line in raw.lines() {
+        if line.contains("---frame---") {
+            if !cur_contents.is_empty() {
+                frames.push((cur_contents.trim_end().to_string(), cur_time_ms));
+                cur_contents.clear();
+            }
+        } else if line.starts_with("time_ms:") {
+            cur_time_ms = line.split(':').nth(1).unwrap().trim().parse().unwrap();
+        } else if !line.is_empty() {
+            cur_contents.push_str(line);
+            cur_contents.push('\n');
+        }
+    }
+
+    if !cur_contents.is_empty() {
+        frames.push((cur_contents.trim_end().to_string(), cur_time_ms));
+    }
+
+    frames
+}
+
+fn str_to_char_buf_2d(s: &str) -> Vec<Vec<char>> {
+    s.lines().map(|line| line.chars().collect()).collect()
+}
+
+// fn pad_char_buf_2d
+
 fn main() {
     let mut out = std::io::stdout();
-    let contents = utils::read("res/frames.txt").unwrap();
-    let mut frames = make_frames(&contents).unwrap();
-    let frame_width = max_frame_width(frames.clone());
-    let frame_height = max_frame_height(frames.clone());
-    fix_frame_sizes(&mut frames, frame_width, frame_height);
+    let raw = utils::read("res/frames.txt").unwrap();
 
-    // initial clear and flush
+    // build vec of frames, where each frame is a tuple w/ 2d char buf and u16 time
+    let frames: Vec<(Vec<Vec<char>>, u16)> = get_keyframes(&raw)
+        .iter()
+        .map(|(frame_contents, time_ms)| (str_to_char_buf_2d(frame_contents), *time_ms))
+        .collect();
+
+    // init values
+    let width: u16 = 200;
+    let height: u16 = 200;
+    let mut bar_ratio = 0.0; // test
+    let bar_len = 30;
+    let mut frame_idx = 0;
+
+    // build empty framebuffer
+    let mut fb = Framebuffer::new(width as usize, height as usize);
+
+    // first time clear
     clear_all(&mut out).unwrap();
     out.flush().unwrap();
 
-    let mut bar_ratio = 0.0; // test
-    let bar_len = 10;
-    let mut frame_idx = 0;
-
+    let pivot_x: usize = 20;
+    let pivot_y: usize = 20;
     while bar_ratio <= 1.0 {
-        let frame = &frames[frame_idx % frames.len()];
+        let (my_art, time_ms) = &frames[frame_idx % frames.len()];
 
-        let renderable: String = make_bar(bar_len, bar_ratio);
+        fb.clear(' ');
+
+        let bar = make_bar(bar_len, bar_ratio);
+        let bar_buf = str_to_char_buf_2d(&bar);
+        let bar_width = bar_buf.first().map_or(0, |r| r.len());
+        for n in 0..3 {
+            fb.write(&bar_buf, pivot_x + 1, pivot_y + 1 + n);
+        }
+
+        fb.write(my_art, pivot_x + bar_width + 1, pivot_y);
 
         // clear last buffer and render new
-        clear_area(&mut out, DefRect::new(0, 0, frame_width, frame_height)).unwrap();
+        clear_area(&mut out, DefRect::new(0, 0, width, height)).unwrap();
         move_cursor_to(&mut out, (0, 0)).unwrap();
-        draw(&frame.contents, &mut out, frame_width, frame_height);
+        draw(&fb, &mut out, width, height);
         out.flush().unwrap();
 
-        std::thread::sleep(std::time::Duration::from_millis(frame.time_ms));
+        std::thread::sleep(std::time::Duration::from_millis(*time_ms as u64));
 
         bar_ratio += 0.01; // test
         frame_idx += 1;
     }
 
     // cleanup
-    move_cursor_to(&mut out, (0, frame_height)).unwrap();
+    move_cursor_to(&mut out, (0, height)).unwrap();
     out.flush().unwrap();
 }
